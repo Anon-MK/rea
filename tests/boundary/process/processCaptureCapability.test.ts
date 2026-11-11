@@ -1,55 +1,72 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  processCaptureProbeFailureReason,
   processCaptureOwnershipUnavailableReason,
   probeProcessCaptureCapability,
 } from "../../../src/process/capture/ProcessCaptureCapability.js";
 
 describe("process capture capability diagnostics", () => {
-  it("distinguishes missing native modules from runtime ABI mismatches", () => {
-    expect(
-      processCaptureProbeFailureReason(
-        Object.assign(
-          new Error("Cannot find package '@lydell/node-pty-win32-x64'"),
-          {
-            code: "ERR_MODULE_NOT_FOUND",
-          },
-        ),
+  it.each([
+    {
+      cause: Object.assign(
+        new Error("Cannot find package '@lydell/node-pty-win32-x64'"),
+        { code: "ERR_MODULE_NOT_FOUND" },
       ),
-    ).toContain("optional dependencies enabled");
-    expect(
-      processCaptureProbeFailureReason(
-        Object.assign(
-          new Error("compiled against a different Node.js version"),
-          {
-            code: "ERR_DLOPEN_FAILED",
-          },
-        ),
+      guidance: /optional dependencies enabled/i,
+    },
+    {
+      cause: Object.assign(
+        new Error("compiled against a different Node.js version"),
+        { code: "ERR_DLOPEN_FAILED" },
       ),
-    ).toContain("incompatible with this Node.js runtime");
-  });
+      guidance: /incompatible with this Node.js runtime/i,
+    },
+    {
+      cause: new Error("spawn EACCES"),
+      guidance: /operating-system or process-startup error/i,
+    },
+  ])(
+    "reports the probe failure and recovery for $cause.message",
+    async ({ cause, guidance }) => {
+      const capability = await probeProcessCaptureCapability({
+        platform: "linux",
+        loadPty: async () => {
+          throw cause;
+        },
+      });
+      expect(capability).toMatchObject({
+        available: false,
+        backend: "node-pty",
+      });
+      if (capability.available) throw new Error("Expected probe failure");
+      expect(capability.reason).toContain(cause.message);
+      expect(capability.reason).toMatch(guidance);
+    },
+  );
 
-  it("returns the actual cause from the real probe boundary", async () => {
+  it("prepares Darwin ownership inspection before probing or admitting a PTY", async () => {
+    let loaded = false;
     const capability = await probeProcessCaptureCapability({
       platform: "darwin",
+      prepareOwnershipInspector: async () => {
+        throw new Error(
+          "macOS process ownership inspection requires the Apple Swift compiler via xcrun",
+        );
+      },
       loadPty: async () => {
-        throw Object.assign(new Error("optional binary was not installed"), {
-          code: "ERR_MODULE_NOT_FOUND",
-        });
+        loaded = true;
+        return await import("@lydell/node-pty");
       },
     });
+
+    expect(loaded).toBe(false);
     expect(capability).toEqual({
       available: false,
       backend: "node-pty",
-      reason: expect.stringContaining("optional binary was not installed"),
+      reason: expect.stringContaining(
+        "requires the Apple Swift compiler via xcrun",
+      ),
     });
-  });
-
-  it("preserves the actual diagnostic for a genuine probe failure", () => {
-    expect(
-      processCaptureProbeFailureReason(new Error("spawn EACCES")),
-    ).toContain("spawn EACCES");
   });
 
   it("keeps the ownership limitation separate from native PTY support", () => {

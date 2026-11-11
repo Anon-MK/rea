@@ -4,8 +4,13 @@ import { projectManagedApplicationGraphEvidence } from "../application/managed/M
 import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { parseCliJsonInput } from "../cliJsonInput.js";
 import { logCliCommand } from "../cliLogging.js";
-import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
-import type { Logger } from "../logger.js";
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
+import { withCommandCancellation } from "./commandCancellation.js";
+import {
+  evidenceBundleOption,
+  runEvidenceInputCommand,
+} from "./evidenceInputCommand.js";
+import type { Logger } from "pino";
 import type { CliInstance } from "./types.js";
 
 /** Register managed static-Evidence application graph projection. */
@@ -21,15 +26,28 @@ export const registerProjectManagedApplicationGraph = (
         .string()
         .describe("Inline managed application graph JSON or JSON file path"),
     }),
-    run: ({ args }) =>
-      logCliCommand(logger, "project-managed-application-graph", async () => {
-        const input = await parseCliJsonInput(
-          args.inputJson,
-          "project-managed-application-graph",
-        );
-        if (!input.ok) return input.error;
-        const result = projectManagedApplicationGraphEvidence(input.value);
-        return result.ok ? result.value : projectAnalysisError(result.error);
-      }),
+    options: z.object({ evidenceBundle: evidenceBundleOption }),
+    run: ({ args, options }) =>
+      withCommandCancellation((signal) =>
+        logCliCommand(logger, "project-managed-application-graph", async () => {
+          const input = await parseCliJsonInput(
+            args.inputJson,
+            "project-managed-application-graph",
+            signal,
+          );
+          if (!input.ok) return input.error;
+          return runEvidenceInputCommand(
+            "project_managed_application_graph",
+            options.evidenceBundle,
+            signal,
+            (lookup) =>
+              Promise.resolve(
+                projectManagedApplicationGraphEvidence(input.value, lookup, {
+                  signal,
+                }),
+              ),
+          ).then(projectCliAnalysisResult);
+        }),
+      ),
   });
 };

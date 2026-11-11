@@ -1,12 +1,14 @@
 import { execFile, spawnSync } from "node:child_process";
-import { copyFile, mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 
 import { inspectModuleBoundaries } from "../../scripts/lib/module-boundaries.mjs";
+import { projectForTest } from "../../scripts/lib/test-projects.mjs";
 import { createTestTempDirectory } from "../fixtures/temporaryDirectory.js";
+import { writeRepositoryOxlintConfiguration } from "../fixtures/oxlintConfiguration.js";
 
 describe("process capture implementation ownership", () => {
   it.each([
@@ -64,6 +66,113 @@ describe("binary production construction ownership", () => {
   });
 });
 
+describe("live capability constructor ownership", () => {
+  it.each([
+    "frida/FridaInstrumentationManager.js",
+    "cutter/CutterBridgeClient.js",
+    "cutter/CutterBridgeService.js",
+    "gdb/GdbSessionManager.js",
+    "rizin/RizinDebugSessionManager.js",
+  ])(
+    "keeps %s values in composition while accepting injected type ports",
+    (owner) => {
+      const source = `import { Constructor as Alias } from "../${owner}";`;
+      const types = `import type { Port } from "../${owner}";`;
+      for (const file of ["src/application/probe.ts", "src/server/probe.ts"]) {
+        expect(
+          inspectModuleBoundaries(file, source, process.cwd()),
+        ).toMatchObject([{ boundary: "provider-construction" }]);
+        expect(inspectModuleBoundaries(file, types, process.cwd())).toEqual([]);
+      }
+      expect(
+        inspectModuleBoundaries(
+          "src/composition/probe.ts",
+          source,
+          process.cwd(),
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  it.each([
+    [
+      'import { Constructor as Alias } from "../frida/FridaInstrumentationManager.js";',
+      false,
+    ],
+    [
+      'import * as Owner from "../frida/FridaInstrumentationManager.js";',
+      false,
+    ],
+    [
+      'import { type Port, Constructor } from "../frida/FridaInstrumentationManager.js";',
+      false,
+    ],
+    [
+      'import { type Port as Alias } from "../frida/FridaInstrumentationManager.js";',
+      false,
+    ],
+    ['import "../frida/FridaInstrumentationManager.js";', false],
+    [
+      'export { Constructor as Alias } from "../frida/FridaInstrumentationManager.js";',
+      false,
+    ],
+    [
+      'export { type Port as Alias } from "../frida/FridaInstrumentationManager.js";',
+      false,
+    ],
+    ['export type * from "../frida/FridaInstrumentationManager.js";', true],
+    ['export * from "../frida/FridaInstrumentationManager.js";', false],
+    [
+      'type Port = import("../frida/FridaInstrumentationManager.js").Port;',
+      true,
+    ],
+    ['const owner = import("../frida/FridaInstrumentationManager.js");', false],
+    ["const owner = import(`../frida/FridaInstrumentationManager.js`);", false],
+    [
+      'import owner = require("../frida/FridaInstrumentationManager.js");',
+      false,
+    ],
+    [
+      'import type Owner = require("../frida/FridaInstrumentationManager.js");',
+      true,
+    ],
+    [
+      'import { Constructor } from "../domain/../frida/FridaInstrumentationManager.js";',
+      false,
+    ],
+    [
+      'const owner = import("../%66rida/FridaInstrumentationManager.js?view=one#part");',
+      false,
+    ],
+  ])("checks type/value ownership in %s", (source, allowed) => {
+    const violations = inspectModuleBoundaries(
+      "src/server/probe.ts",
+      source,
+      process.cwd(),
+    );
+    if (allowed) expect(violations).toEqual([]);
+    else
+      expect(violations).toMatchObject([{ boundary: "provider-construction" }]);
+  });
+
+  it("does not broaden the new guard to other provider-owned policy helpers", () => {
+    expect(
+      inspectModuleBoundaries(
+        "src/server/probe.ts",
+        'import { policy } from "../frida/fridaCaptureLimits.js";',
+        process.cwd(),
+      ),
+    ).toEqual([]);
+  });
+
+  it.each([
+    "src/frida/FridaInstrumentationManager.test.ts",
+    "src/frida/nested/FutureProvider.test.ts",
+  ])("assigns %s to the adapter test project", (path) => {
+    expect(projectForTest(path).name).toBe("adapters");
+  });
+});
+
 const execute = promisify(execFile);
 const verifier = resolve("scripts/verify-module-boundaries.mjs");
 
@@ -76,7 +185,7 @@ describe("incremental module import boundaries", () => {
     ["src/contracts/probe.ts", "../composition/android.js", false],
     [
       "src/artifacts/javascript/probe.ts",
-      "../../application/ArtifactInventory.js",
+      "../../application/javascript/JavaScriptArtifactReconstruction.js",
       false,
     ],
     [
@@ -87,7 +196,7 @@ describe("incremental module import boundaries", () => {
     ["src/artifacts/javascript/probe.ts", "../../cli.js", false],
     [
       "src/artifacts/ArtifactHash.ts",
-      "../application/ArtifactInventory/hash.js",
+      "../application/artifacts/ArtifactExtractionDestination.js",
       false,
     ],
     [
@@ -111,11 +220,7 @@ describe("incremental module import boundaries", () => {
       "../../artifacts/javascript/JavaScriptArtifactReader.js",
       true,
     ],
-    [
-      "src/application/ArtifactInventory/probe.ts",
-      "../../artifacts/AsarArtifactReader.js",
-      true,
-    ],
+    ["src/artifacts/inventory/probe.ts", "../AsarArtifactReader.js", true],
     ["src/domain/probe.test.ts", "../composition/firmware.js", false],
     ["src/application/probe.ts", "../android/JadxProvider.js", false],
     ["src/application/probe.ts", "../composition/android.js", false],
@@ -163,33 +268,19 @@ describe("incremental module import boundaries", () => {
     ["src/domain/probe.test.ts", "../dotnet/ManagedMemberInspector.js", false],
     ["src/server/probe.ts", "../composition/android.js", true],
     ["src/application/probe.ts", "../browser/CdpCaptureValues.js", true],
-    ["src/hopper/probe.ts", "../generatedMcpToolCatalog.js", false],
-    ["src/ghidra/probe.ts", "../generatedMcpToolCatalog.ts", false],
-    ["src/ida/probe.ts", "../generatedMcpToolCatalog.js", false],
-    ["src/artifacts/probe.ts", "../generatedMcpToolCatalog.js", false],
-    ["src/browser/probe.ts", "../generatedMcpToolCatalog.js", false],
     ["src/ghidra/probe.ts", "../generatedPackageMetadata.js", true],
     ["src/hopper/probe.ts", "../contracts/officialToolContracts.js", true],
-    [
-      "src/application/binary/probe.ts",
-      "../../generatedMcpToolCatalog.js",
-      true,
-    ],
-  ])("checks %s importing %s", async (file, dependency, allowed) => {
-    const temporary = await createTestTempDirectory("rea-module-boundary-");
-    const fixture = join(temporary, file);
-    await mkdir(dirname(fixture), { recursive: true });
-    await writeFile(
-      fixture,
+  ])("checks %s importing %s", (file, dependency, allowed) => {
+    const violations = inspectModuleBoundaries(
+      file,
       `import { value } from ${JSON.stringify(dependency)}; export { value };\n`,
+      process.cwd(),
     );
-    const result = spawnSync(process.execPath, [verifier, file], {
-      cwd: temporary,
-      encoding: "utf8",
-    });
-    if (result.error !== undefined) throw result.error;
-    expect(result.status).toBe(allowed ? 0 : 1);
-    if (!allowed) expect(result.stderr).toContain("resolves to src/");
+    if (allowed) expect(violations).toEqual([]);
+    else
+      expect(violations).toMatchObject([
+        { file, boundary: expect.any(String) },
+      ]);
   });
 });
 
@@ -293,57 +384,125 @@ describe("module import syntax and source discovery", () => {
     expect(result.stderr).toContain("src/domain/probe.ts:1: pure-layer");
     expect(result.stderr).not.toContain("old.ts");
   });
+
+  it("discovers forbidden nested sources without a Git worktree", async () => {
+    const temporary = await createTestTempDirectory("rea-module-no-git-");
+    await mkdir(join(temporary, "src", "domain", "nested"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(temporary, "src/domain/nested/probe.ts"),
+      'import { createServer } from "../../server/createServer.js";\n',
+    );
+    const result = spawnSync(process.execPath, [verifier], {
+      cwd: temporary,
+      encoding: "utf8",
+    });
+    if (result.error !== undefined) throw result.error;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("src/domain/nested/probe.ts");
+    expect(result.stderr).toContain("src/server/createServer.js");
+  });
+
+  it("discovers sources in an ignored archive nested under an ancestor Git worktree", async () => {
+    const outer = await createTestTempDirectory("rea-module-ancestor-git-");
+    const archive = join(outer, "archive");
+    await writeFile(join(outer, ".gitignore"), "archive/\n");
+    await execute("git", ["init", "--quiet"], { cwd: outer });
+    await execute("git", ["add", "--", ".gitignore"], { cwd: outer });
+    await mkdir(join(archive, "src", "domain"), { recursive: true });
+    await writeFile(
+      join(archive, "src/domain/probe.ts"),
+      'import { createServer } from "../server/createServer.js";\n',
+    );
+
+    const result = spawnSync(process.execPath, [verifier], {
+      cwd: archive,
+      encoding: "utf8",
+    });
+    if (result.error !== undefined) throw result.error;
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("src/domain/probe.ts:1: pure-layer");
+    expect(result.stderr).toContain("src/server/createServer.js");
+  });
 });
 
 describe("test lane import boundaries", () => {
-  it.each([
+  const cases: Array<[string, string, boolean]> = [
     ["src/application/probe.test.ts", "../server/createServer.js", false],
-    ["tests/composition/probe.test.ts", "node:child_process", false],
-    ["tests/composition/probe.test.ts", "node:net", false],
-    ["tests/composition/probe.test.ts", "playwright", false],
-    ["tests/composition/probe.test.ts", "../../src/domain/result.js", true],
-  ])("checks %s importing %s", async (file, dependency, allowed) => {
+    ["tests/composition/process.test.ts", "node:child_process", false],
+    ["tests/composition/net.test.ts", "node:net", false],
+    ["tests/composition/browser.test.ts", "playwright", false],
+    ["tests/composition/domain.test.ts", "../../src/domain/result.js", true],
+  ];
+
+  it("checks the test-lane import matrix in one lint invocation", async () => {
     const temporary = await createTestTempDirectory("rea-test-lane-");
-    const config = join(temporary, ".oxlintrc.json");
-    await copyFile(resolve(".oxlintrc.json"), config);
-    await mkdir(dirname(join(temporary, file)), { recursive: true });
-    await writeFile(
-      join(temporary, file),
-      `import { value } from ${JSON.stringify(dependency)}; export { value };\n`,
-    );
+    const config = await writeRepositoryOxlintConfiguration(temporary);
+    for (const [file, dependency] of cases) {
+      await mkdir(dirname(join(temporary, file)), { recursive: true });
+      await writeFile(
+        join(temporary, file),
+        `import { value } from ${JSON.stringify(dependency)}; export { value };\n`,
+      );
+    }
     const result = spawnSync(
       process.execPath,
       [
         resolve("node_modules/oxlint/bin/oxlint"),
         "-c",
         config,
+        "--threads",
+        "1",
         "--format",
         "json",
-        file,
+        ...cases.map(([file]) => file),
       ],
       { cwd: temporary, encoding: "utf8" },
     );
     if (result.error !== undefined) throw result.error;
-    expect(result.status).toBe(allowed ? 0 : 1);
-    if (!allowed) expect(result.stdout).toContain("no-restricted-imports");
-  });
-});
-
-describe("Apple artifact producer ownership", () => {
-  it.each([
-    ["../../application/Workflow.js", false],
-    ["../../composition/android.js", false],
-    ["../../cli.js", false],
-    ["../../domain/apple/plistValue.js", true],
-    ["../DirectoryArtifactReader.js", true],
-  ])("checks the producer dependency %s", (dependency, allowed) => {
-    const violations = inspectModuleBoundaries(
-      "src/artifacts/apple/probe.ts",
-      `import type { Value } from ${JSON.stringify(dependency)};`,
-      process.cwd(),
+    expect(
+      result.stdout.trimStart().startsWith("{"),
+      `oxlint exited ${String(result.status)} (${String(result.signal)}): ${result.stdout}\n${result.stderr}`,
+    ).toBe(true);
+    const report = JSON.parse(result.stdout) as {
+      diagnostics: Array<{ filename: string; code: string }>;
+    };
+    const violations = new Set(
+      report.diagnostics
+        .filter(({ code }) => code === "eslint(no-restricted-imports)")
+        .map(({ filename }) => filename.replaceAll("\\", "/")),
     );
-
-    expect(violations.length === 0).toBe(allowed);
-    if (!allowed) expect(violations[0]?.boundary).toBe("artifact-acquisition");
+    for (const [file, , allowed] of cases)
+      expect(violations.has(file)).toBe(!allowed);
+    expect(result.status).toBe(cases.some(([, , allowed]) => !allowed) ? 1 : 0);
   });
 });
+
+describe.each(["apple", "inventory", "extraction"])(
+  "%s artifact producer ownership",
+  (owner) => {
+    it.each([
+      ["../../application/Workflow.js", false],
+      ["../../composition/android.js", false],
+      ["../../cli.js", false],
+      ["../../server/registerEvidenceTools.js", false],
+      ["../../main.ts", false],
+      ["../../domain/apple/plistValue.js", true],
+      ["../../domain/artifactInventorySnapshot.js", true],
+      ["../../contracts/artifactGraph.js", true],
+      ["../DirectoryArtifactReader.js", true],
+      ["../ArtifactHash.js", true],
+    ])("checks the producer dependency %s", (dependency, allowed) => {
+      const violations = inspectModuleBoundaries(
+        `src/artifacts/${owner}/probe.ts`,
+        `import type { Value } from ${JSON.stringify(dependency)};`,
+        process.cwd(),
+      );
+
+      expect(violations.length === 0).toBe(allowed);
+      if (!allowed)
+        expect(violations[0]?.boundary).toBe("artifact-acquisition");
+    });
+  },
+);

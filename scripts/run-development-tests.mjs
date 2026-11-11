@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   developmentTestPlan,
@@ -10,6 +11,7 @@ import {
 let child;
 let forceTimer;
 let shutdownSignal;
+let childOwnsTree = false;
 const signalExitCodes = { SIGINT: 130, SIGTERM: 143 };
 for (const signal of Object.keys(signalExitCodes))
   process.on(signal, () => {
@@ -17,8 +19,10 @@ for (const signal of Object.keys(signalExitCodes))
     shutdownSignal = signal;
     if (child !== undefined && child.exitCode === null) {
       child.kill(signal);
-      forceTimer = setTimeout(() => child?.kill("SIGKILL"), 1_000);
-      forceTimer.unref?.();
+      if (!childOwnsTree) {
+        forceTimer = setTimeout(() => child?.kill("SIGKILL"), 1_000);
+        forceTimer.unref?.();
+      }
     }
   });
 
@@ -47,21 +51,46 @@ try {
         ? `Focused tests: ${request.paths.join(", ")}`
         : `Source-test feedback${baseCommit ? ` from merge base ${baseCommit}` : ""}; compiled boundaries and real providers need explicit verification.`,
     );
-    if (plan.needsBuild) {
-      if (!process.env.npm_execpath)
-        throw new Error("Run compiled tests through npm run test:focused");
-      const built = await run(process.execPath, [
-        process.env.npm_execpath,
-        "run",
-        "build:cached",
+    if (plan.needsBuild || plan.artifactTasks.length > 0) {
+      const dependencies = await run(process.execPath, [
+        "scripts/check-dependency-install.mjs",
       ]);
-      if (built.code !== 0) process.exitCode = built.code;
+      if (dependencies.code !== 0)
+        throw new Error(
+          "Test prerequisites require the locked dependency installation",
+        );
+      const prepared = await run(
+        process.execPath,
+        [
+          "scripts/run-exclusive.mjs",
+          "artifacts",
+          process.execPath,
+          resolve("scripts/run-turbo.mjs"),
+          "run",
+          ...new Set([
+            ...(plan.needsBuild ? ["artifacts:skills"] : []),
+            ...plan.artifactTasks,
+          ]),
+        ],
+        false,
+        "existing",
+      );
+      if (prepared.code !== 0) process.exitCode = prepared.code;
     }
     if (!process.exitCode && !shutdownSignal) {
-      const tested = await run(process.execPath, [
-        resolve("node_modules/vitest/vitest.mjs"),
-        ...plan.vitestArguments,
-      ]);
+      const tested = await run(
+        process.execPath,
+        [
+          resolve(
+            request.paths.length > 0
+              ? "scripts/run-exact-tests.mjs"
+              : "node_modules/vitest/vitest.mjs",
+          ),
+          ...plan.vitestArguments,
+        ],
+        false,
+        "test",
+      );
       process.exitCode = tested.code;
     }
   }
@@ -71,15 +100,27 @@ try {
 }
 if (shutdownSignal) process.exitCode = signalExitCodes[shutdownSignal];
 
-function run(executable, arguments_, capture = false) {
+function run(executable, arguments_, capture = false, supervision) {
   if (shutdownSignal)
     return Promise.resolve({
       code: signalExitCodes[shutdownSignal],
       output: "",
     });
-  child = spawn(executable, arguments_, {
-    stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
-  });
+  // Source-only tests do not require the built Windows Job Object artifact.
+  const wrap = supervision === "test" && process.platform !== "win32";
+  childOwnsTree = supervision === "existing" || wrap;
+  child = spawn(
+    wrap ? process.execPath : executable,
+    wrap
+      ? [
+          fileURLToPath(new URL("./run-exclusive.mjs", import.meta.url)),
+          "--unlocked",
+          executable,
+          ...arguments_,
+        ]
+      : arguments_,
+    { stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit" },
+  );
   let output = "";
   if (capture) {
     child.stdout.on("data", (data) => (output += data.toString()));

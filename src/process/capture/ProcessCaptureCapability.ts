@@ -1,4 +1,5 @@
 import { tmpdir } from "node:os";
+import { prepareProcessOwnershipInspection } from "../ProcessOwnershipObservation.js";
 
 export type ProcessCaptureCapability =
   | { readonly available: true; readonly backend: "node-pty" }
@@ -20,10 +21,11 @@ export const processCaptureOwnershipUnavailableReason = (
 export interface ProcessCaptureProbeOptions {
   readonly platform?: NodeJS.Platform;
   readonly loadPty?: () => Promise<typeof import("@lydell/node-pty")>;
+  readonly prepareOwnershipInspector?: () => Promise<void>;
 }
 
 /** Probe the native PTY seam and explain loader failures at their source. */
-export const processCaptureProbeFailureReason = (cause: unknown): string => {
+const processCaptureProbeFailureReason = (cause: unknown): string => {
   const error = cause instanceof Error ? cause : new Error(String(cause));
   const code = "code" in error ? String(error.code) : "";
   const diagnostic = error.message;
@@ -56,6 +58,22 @@ export const probeProcessCaptureCapability = async (
       backend: "node-pty",
       reason: ownershipReason,
     };
+  if (platform === "darwin") {
+    try {
+      await (
+        options.prepareOwnershipInspector ?? prepareProcessOwnershipInspection
+      )();
+    } catch (cause: unknown) {
+      return {
+        available: false,
+        backend: "node-pty",
+        reason:
+          cause instanceof Error
+            ? cause.message
+            : "macOS process ownership inspection could not be prepared",
+      };
+    }
+  }
   try {
     const { spawn } = await (
       options.loadPty ?? (() => import("@lydell/node-pty"))
